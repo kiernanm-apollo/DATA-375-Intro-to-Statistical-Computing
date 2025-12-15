@@ -1,0 +1,233 @@
+---
+title: "Course Project_Data375"
+output: html_notebook
+---
+
+#NHL Home Team Advantage Calculation
+##PART 1: Calculating if Advantage Exists
+###Importing libraries and examining Data
+```{r}
+library(dplyr)
+library(ggplot2)
+data<-read.csv("C:/Users/13166/Documents/game.csv")
+head(data)
+```
+###Calculating Home advantage based on outcome
+```{r}
+data<-data%>%
+  mutate(home_win=ifelse(home_goals>away_goals,1,0), overtime = ifelse(outcome %in% c("OT", "SO"), "OT/SO", "Regulation"))
+home_team_win<-mean(data$home_win, na.rm=TRUE)
+home_team_win
+```
+
+
+#Creating table of wins
+```{r}
+ot_table <- data %>%
+  group_by(overtime, home_win) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  mutate(
+    result = ifelse(home_win == 1, "Home Win", "Away Win"),
+    proportion = n / sum(n)
+  )
+
+ot_table
+```
+#Visualize Wins Summary
+```{r}
+ggplot(ot_table, aes(x = overtime, y = proportion, fill = result)) +
+  geom_col(position = position_dodge(width = 0.8)) +
+  labs(
+    title = "Proportion of Home vs Away Wins",
+    x = "Game Type",
+    y = "Win Proportion",
+    fill = "Result"
+  ) 
+```
+#Basic Single Tailed Hypothesis Test on Results
+#H0: Home Wins=0.5
+#H1: Home Wins>0.5
+```{r}
+h_test<-binom.test(x=sum(data$home_win), n=nrow(data),p=0.5, alternative='greater')
+h_test
+```
+#The P-Value being extremely small means that this is likely proof there is a home team advantage, however lets dig deeper
+
+#PART 2: Confidence Interval for Goal Differential 
+#Importing Team Statistic CSV File
+```{r}
+library(dplyr)
+library(tidyr)
+team_stat<-read.csv("C:/Users/13166/Documents/game_teams_stats.csv")
+team_clean<-team_stat%>% select(game_id, team_id, HoA, goals, shots)
+teams_org<-team_clean%>% 
+  pivot_wider(
+    id_cols = game_id,
+    names_from = HoA,
+    values_from = c(goals, shots),
+    names_sep = "_"
+  )
+```
+#Combining CSV Files
+```{r}
+data2<-data%>% left_join(teams_org, by='game_id')
+head(data2)
+```
+#Computing Goald and Shot Differential
+```{r}
+data2<-data2%>%
+  mutate(goal_diff=goals_home-goals_away,
+         shot_diff=shots_home-shots_away,
+         home_win=ifelse(goal_diff>0,1,0))
+```
+
+#Binomial Confidence Interval Calculation
+```{r}
+#Finding probability of goal which will be used to calculate variance in CI
+prob_goal<-mean((data2$goals_home + data2$goals_away) /
+               (data2$shots_home+data2$shots_away),
+               na.rm=TRUE)
+#Computing binomial based variance and CI
+data2<-data2%>%
+  mutate(var_home=shots_home*prob_goal*(1-prob_goal),
+         var_away=shots_away*prob_goal*(1-prob_goal),
+         se=sqrt(var_home+var_away),
+         ci_lower=goal_diff -(1.96*se),
+         ci_upper=goal_diff+(1.96*se),
+         uncertain_outcome=ifelse(ci_lower<=0 & ci_upper>=0,1,0))
+```
+
+#Number of Games where Confidence Interval encompasses 0 (uncertain outcomes)
+```{r}
+num_uncertain<-sum(data2$uncertain_outcome)
+num_uncertain
+```
+#Proportion of games with uncertain outcome
+```{r}
+prop_uncertain<-num_uncertain/nrow(data2)
+prop_uncertain
+```
+#Estimating new win rate excluding games of uncertain outcome
+```{r}
+home_win_new <- mean(data2$home_win[data2$uncertain_outcome == 0], na.rm = TRUE)
+home_win_new
+```
+#Examining wins where the Goal Differential swaps the outcome under the Confidence Interval
+```{r}
+data2<-data2%>%
+  #Home won, but CI says may not have actually won
+  mutate(home_win_flip=ifelse(home_win==1 & ci_lower<=0,1,0),
+  #Away won, but CI says may not have actaully won
+         away_win_flip=ifelse(home_win==0 & ci_upper>=0,1,0))
+flip_count<-sum(data2$home_win_flip+data2$away_win_flip, na.rm=TRUE)
+```
+#Organizing Home Win Flips and Away Win Flips into a table
+```{r}
+flip_table<-data2%>%
+  summarise(home_win_flips=sum(home_win_flip, na.rm=TRUE),
+            away_win_flips=sum(away_win_flip, na.rm=TRUE),
+            total_flips=home_win_flips+away_win_flips)
+flip_table
+nrow(data2)
+```
+#Drawing conclusions on this part, 10795 games out of 11434 were found to have possibly swapped goal differentials (outcomes). More importantly 5560 away win games could have been flipped to home wins by uncertainty. Also we found the adjusted win rate excluding uncertain games jumped up to 64%
+
+#PART 3
+#In this part I will be hypothesis testing to determine whether the game outcome does or does not depend on where the team is playing by randomly assigning labels home and away to a dsitribution of simulated game outcomes
+
+#Initializing Monte Carlo Simulations
+```{r}
+library(ggplot2)
+n_sims<-10000
+obs_home_rate<-mean(data$home_win, na.rm=TRUE)
+obs_home_rate
+```
+#Continuation
+```{r}
+set.seed(444)
+n_games<-nrow(data)
+#Creating matrix of random flips, swapping home/away for each game
+flip<-matrix(rbinom(n_sims*n_games, size=1, prob=0.5), nrow=n_sims, ncol=n_games)
+#Replicate observed home_win row to matrix
+home_win_mat<-matrix(rep(data$home_win, each=n_sims), nrow=n_sims, byrow=TRUE)
+#If flip=1 then we swap the label so simulated_home_win=1-observed
+sim_home_win_mat<-ifelse(flip==1,1-home_win_mat, home_win_mat)
+#Computing simulated home win rates
+sim_home_rates<-rowMeans(sim_home_win_mat, na.rm=TRUE)
+head(sim_home_rates)
+```
+
+#H0: home rate=0.5
+#H1: home rate>0.5
+```{r}
+p_value<-mean(sim_home_rates>=obs_home_rate)
+p_value
+```
+#2 sided p value to double check
+```{r}
+#Checking how many of the null simulations (home_win=0.5) are greater than the observed win rate
+p_value_two_sided <- mean(abs(sim_home_rates - 0.5) >= abs(obs_home_rate - 0.5))
+p_value_two_sided
+```
+#Null distribution
+```{r}
+null_summary <- quantile(sim_home_rates, probs = c(0.01, 0.025, 0.05, 0.5, 0.95, 0.975, 0.99))
+null_summary
+```
+#Distribution mainly ranges from [0.48,0.51]
+
+#Plotted null distribution
+```{r}
+ggplot(data.frame(sim_home_rates = sim_home_rates), aes(x = sim_home_rates)) +
+  geom_histogram(binwidth = 0.001, fill = "lightblue", color = "white") +
+  geom_vline(xintercept = obs_home_rate, color = "red", size = 1) +
+  labs(title = "Permutation Null Distribution of Home-win Rate",
+       subtitle = paste0("Observed home-win rate = ", round(obs_home_rate, 4),
+                         " (red line).  n_sims = ", n_sims),
+       x = "Simulated home-win rate under null",
+       y = "Count") +
+  theme_minimal()
+```
+#Results
+```{r}
+results <- data.frame(
+  observed_home_rate = obs_home_rate,
+  p_value = p_value,
+  p_value_two_sided = p_value_two_sided,
+  mean_null = mean(sim_home_rates),
+  sd_null = sd(sim_home_rates),
+  n_sims = n_sims
+)
+print(results)
+```
+#This means that from the data we observed a home game win rate of 54.5%, while our null distribution had a mean of around 50%, and never having a win rate higher than 52%. This means the home win rate cannot be due to random chance since we reject the null(which was simulated due to equal proability of wining)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
